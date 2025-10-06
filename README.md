@@ -31,3 +31,25 @@ A single-page app: paste or upload → click Generate Minutes → get structured
       - Without AI: Returns a ready-to-edit Minutes template (no external calls).
 
 4. Polish: Toggle formatting to ensure neat bullets and spacing.
+
+🧪 Live Demo
+
+Live URL: add your Streamlit URL here
+
+🛠 Tech Stack
+
+      Frontend/App: Streamlit
+
+      Parsing: pypdf (PDF), python-docx (DOCX)
+
+      LLM (optional): OpenAI via openai Python SDK
+
+🔐 Privacy (GDPR-lite posture)
+
+      No storage: Data is processed in memory and discarded when the session ends.
+
+      PII Masking (optional): Emails, phone numbers, and names are masked locally before any AI call.
+
+      Local-only mode: If AI is disabled or no key is provided, no data leaves the session.
+
+      For a production system, add DPA, sub-processor disclosures, DPIA, and data-subject request handling.
