@@ -37,19 +37,18 @@ A single-page app: paste or upload → click Generate Minutes → get structured
 Live URL: add your Streamlit URL here
 
 🛠 Tech Stack
-
-      Frontend/App: Streamlit
-
-      Parsing: pypdf (PDF), python-docx (DOCX)
-
-      LLM (optional): OpenAI via openai Python SDK
+  - Frontend/App: Streamlit
+  
+  - Parsing: pypdf (PDF), python-docx (DOCX)
+  
+  - LLM (optional): OpenAI via openai Python SDK
 
 🔐 Privacy (GDPR-lite posture)
 
-      No storage: Data is processed in memory and discarded when the session ends.
+  - No storage: Data is processed in memory and discarded when the session ends.
 
-      PII Masking (optional): Emails, phone numbers, and names are masked locally before any AI call.
+  - PII Masking (optional): Emails, phone numbers, and names are masked locally before any AI call.
 
-      Local-only mode: If AI is disabled or no key is provided, no data leaves the session.
+  - Local-only mode: If AI is disabled or no key is provided, no data leaves the session.
 
-      For a production system, add DPA, sub-processor disclosures, DPIA, and data-subject request handling.
+  - For a production system, add DPA, sub-processor disclosures, DPIA, and data-subject request handling.
