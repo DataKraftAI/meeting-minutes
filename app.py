@@ -6,30 +6,22 @@ st.set_page_config(page_title="Meeting & Email Minutes", layout="wide")
 st.title("📝 Meeting & Email Minutes")
 st.caption("Paste text or upload .txt / .pdf / .docx → get clean, structured minutes: Decisions, Action Items, Risks, Open Questions, Next Steps.")
 
-# ===================== Sidebar (plain-English hints) =====================
+# ===================== Sidebar (kept simple) =====================
 with st.sidebar:
     st.subheader("AI")
-    use_ai = st.checkbox(
-        "Use AI (OpenAI)",
-        value=True,
-        help="If ON, the app uses OpenAI to structure minutes. Your API key is read securely from Streamlit 'Secrets'."
-    )
+    st.write("Model: **gpt-4o-mini**")
     audience = st.selectbox(
         "Audience tone",
         ["Executive", "Operations", "Technical"],
         help="Shapes the writing style (concise for execs, detail for technical)."
     )
-
     st.markdown("---")
-    st.subheader("Presentation")
     polish = st.checkbox(
         "Keep bullets tidy (recommended)",
         value=True,
         help="Cleans small formatting issues like list bullets and spacing."
     )
-
     st.markdown("---")
-    st.subheader("Privacy")
     mask_pii = st.checkbox(
         "Hide personal info before processing",
         value=True,
@@ -41,14 +33,10 @@ def normalize_markdown(txt: str) -> str:
     if not txt:
         return ""
     t = txt.strip()
-    # unify bullets
-    t = re.sub(r'^[\s•*·]\s*', "- ", t, flags=re.MULTILINE)
-    # numbered lists "1) " or "1. " -> "1. "
-    t = re.sub(r'^\s*(\d+)[\)\.]\s+', r'\1. ', t, flags=re.MULTILINE)
-    # blank line after headings like **Decisions**
-    t = re.sub(r'(\*\*[^*]+?\*\*)(?!\n\n)', r'\1\n', t)
-    # collapse >2 blank lines
-    t = re.sub(r'\n{3,}', '\n\n', t)
+    t = re.sub(r'^[\s•*·]\s*', "- ", t, flags=re.MULTILINE)     # unify bullets
+    t = re.sub(r'^\s*(\d+)[\)\.]\s+', r'\1. ', t, flags=re.MULTILINE)  # numbered lists
+    t = re.sub(r'(\*\*[^*]+?\*\*)(?!\n\n)', r'\1\n', t)         # blank line after headings
+    t = re.sub(r'\n{3,}', '\n\n', t)                            # collapse >2 blank lines
     return t
 
 # ============================ PII masking helpers ============================
@@ -56,15 +44,14 @@ EMAIL_RE = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.I)
 PHONE_RE = re.compile(r'(\+?\d[\d\-\s\(\)]{7,}\d)')
 NAME_CANDIDATE_RE = re.compile(r'\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,2})\b')
 
-STOP_TOKENS = {
-    "Meeting","Minutes","Action","Actions","Items","Item","Next","Steps",
-    "Open","Questions","Decisions","Decision","Project","Policy","Summary",
-    "GDPR","AI","Data","LLM","Email","Phone","Owner","Deadline","Risk",
-    "Risks","Notes","Agenda","Follow","Up","Follow-Up","Q&A"
-}
+STOP_TOKENS = {"Meeting","Minutes","Action","Actions","Items","Item","Next","Steps",
+               "Open","Questions","Decisions","Decision","Project","Policy","Summary",
+               "GDPR","AI","Data","LLM","Email","Phone","Owner","Deadline","Risk",
+               "Risks","Notes","Agenda","Follow","Up","Follow-Up","Q&A"}
 MONTHS = {"January","February","March","April","May","June","July","August","September",
           "October","November","December","Jan","Feb","Mar","Apr","Jun","Jul","Aug","Sep","Sept","Oct","Nov","Dec"}
-DAYS = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday","Mon","Tue","Wed","Thu","Fri","Sat","Sun"}
+DAYS = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday",
+        "Mon","Tue","Wed","Thu","Fri","Sat","Sun"}
 
 def looks_like_name(candidate: str) -> bool:
     tokens = candidate.split()
@@ -138,30 +125,26 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
             parts.append(t.strip())
     return "\n\n---\n\n".join(parts)
 
-# ============================= OpenAI caller (new SDK only) ==================
+# ============================= OpenAI (legacy SDK) ===========================
 def call_openai_minutes(prompt: str) -> str:
     """
-    Uses OpenAI Python SDK >=1.0 only.
-    Reads OPENAI_API_KEY from Streamlit Secrets or env.
-    Sets env var then calls OpenAI() with no kwargs to avoid proxy kwarg issues.
+    Uses OpenAI Python SDK 0.28.x (ChatCompletion).
+    Reads OPENAI_API_KEY from Streamlit Secrets or env. Shows raw errors.
     """
     api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
 
-    # Put the key into env so OpenAI() can pick it up with no kwargs
-    os.environ["OPENAI_API_KEY"] = api_key
+    import openai
+    openai.api_key = api_key
 
-    from openai import OpenAI
-    client = OpenAI()  # no kwargs
-
-    resp = client.chat.completions.create(
+    resp = openai.ChatCompletion.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
-        max_tokens=700
+        max_tokens=700,
     )
-    return resp.choices[0].message.content.strip()
+    return resp["choices"][0]["message"]["content"].strip()
 
 # ================================ Prompt builder =============================
 def build_prompt(audience: str, raw: str) -> str:
@@ -219,7 +202,7 @@ with st.expander("Preview extracted text (first 5,000 chars)", expanded=False):
 
 st.markdown(
     "> **Privacy note:** Nothing is stored. If AI is ON, text is sent to OpenAI **after optional masking**. "
-    "If AI is OFF, the app shows a clean minutes template you can edit."
+    "If no key is configured, the app shows a clean minutes template you can edit."
 )
 
 # ================================== Action ==================================
@@ -234,16 +217,12 @@ if st.button("Generate Minutes"):
     else:
         processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
 
-    if use_ai:
-        try:
-            prompt = build_prompt(audience, processed_text)
-            raw_out = call_openai_minutes(prompt)
-        except Exception as e:
-            # Show the exact error from OpenAI (rate limit, quota, auth, etc.)
-            st.error(f"OpenAI error: {e}")
-            st.stop()
-    else:
-        # No AI: simple editable template (no heuristics)
+    # Try AI; if missing key or API error, fall back to editable template
+    try:
+        prompt = build_prompt(audience, processed_text)
+        raw_out = call_openai_minutes(prompt)
+    except Exception as e:
+        st.error(f"OpenAI error: {e}")
         raw_out = (
             "**Decisions**\n- —\n\n"
             "**Action Items (Owner, Deadline)**\n- —\n\n"
