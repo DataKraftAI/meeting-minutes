@@ -150,43 +150,31 @@ Text to structure:
 HEADINGS = ["Decisions", "Action Items", "Risks", "Open Questions", "Next Steps"]
 
 def canonicalize_minutes(md: str) -> str:
-    """
-    Convert any model quirks into the exact heading + bullets shape:
-    - Normalize headings to '### <Heading>'
-    - Never bullet the headings
-    - Bullet only lines under a known section
-    - Strip stray '*' around headings
-    """
     lines = [ln.rstrip() for ln in md.strip().splitlines()]
     out = []
     current = None
 
-    # patterns that should map to a heading
     heading_pat = re.compile(r'^\s*[*_#\-\s]*\s*(Decisions|Action Items|Risks|Open Questions|Next Steps)\s*:?\s*[*_#\s]*$', re.I)
-    # bullets we accept for items
     item_lead_pat = re.compile(r'^\s*[-•*·]\s*')
 
     def emit_heading(h: str):
         out.append(f"### {h}")
-        out.append("")  # blank line after heading
+        out.append("")
 
     for raw in lines:
         txt = raw.strip()
-
-        # skip empty lines unless we need a spacer after heading
         if not txt:
             continue
 
         m = heading_pat.match(txt)
         if m:
             current = m.group(1).title()
-            if current not in HEADINGS:
+            if current in HEADINGS:
+                emit_heading(current)
+            else:
                 current = None
-                continue
-            emit_heading(current)
             continue
 
-        # if the model included something like "**Decisions**" inline
         star_stripped = re.sub(r'^\*+|\*+$', '', txt).strip()
         m2 = heading_pat.match(star_stripped)
         if m2:
@@ -197,22 +185,13 @@ def canonicalize_minutes(md: str) -> str:
                 current = None
             continue
 
-        # If not inside a section yet, try to detect a "Minutes"/noise line and skip
         if current is None:
-            maybe_heading = heading_pat.match(txt)
-            if maybe_heading:
-                current = maybe_heading.group(1).title()
-                emit_heading(current)
-            else:
-                # ignore non-section lines above the first heading
-                continue
+            continue
         else:
-            # We are inside a known section -> add as bullet
-            item = item_lead_pat.sub("", txt)  # remove any leading bullet chars
+            item = item_lead_pat.sub("", txt)
             if item and not item.startswith("###"):
                 out.append(f"- {item}")
 
-    # Ensure all sections exist (for consistent look)
     present = set([ln[4:] for ln in out if ln.startswith("### ")])
     for h in HEADINGS:
         if h not in present:
@@ -222,7 +201,6 @@ def canonicalize_minutes(md: str) -> str:
             out.append("")
             out.append("- —")
 
-    # Collapse excess blank lines
     final = []
     prev_blank = False
     for ln in out:
@@ -237,10 +215,6 @@ def canonicalize_minutes(md: str) -> str:
 
 # ============================= OpenAI (legacy SDK) ===========================
 def call_openai_minutes(prompt: str) -> str:
-    """
-    Uses OpenAI Python SDK 0.28.x (ChatCompletion).
-    Reads OPENAI_API_KEY from Streamlit Secrets or env. Shows raw errors.
-    """
     api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
@@ -293,36 +267,42 @@ st.markdown(
     "> **Privacy note:** Nothing is stored. If AI is ON, text is sent to OpenAI **after optional masking**."
 )
 
-# ================================== Action ==================================
-if st.button("Generate Minutes"):
+# ================================== Action (with BIG progress box) ==========
+generate = st.button("Generate Minutes", type="primary")
+if generate:
     if not full_text.strip():
         st.warning("Please paste text or upload at least one file.")
         st.stop()
 
-    # Mask BEFORE any AI usage
-    if mask_pii:
-        processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
-    else:
-        processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
+    with st.status("Generating minutes…", expanded=True) as status:
+        status.update(label="Masking personal info…")
+        if mask_pii:
+            processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
+        else:
+            processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
 
-    try:
-        prompt = build_prompt(audience, processed_text)
-        raw_out = call_openai_minutes(prompt)
-    except Exception as e:
-        st.error(f"OpenAI error: {e}")
-        raw_out = (
-            "### Decisions\n- —\n\n"
-            "### Action Items\n- —\n\n"
-            "### Risks\n- —\n\n"
-            "### Open Questions\n- —\n\n"
-            "### Next Steps\n- —\n"
-        )
+        status.update(label="Calling OpenAI…")
+        try:
+            prompt = build_prompt(audience, processed_text)
+            raw_out = call_openai_minutes(prompt)
+        except Exception as e:
+            status.update(label="OpenAI error — showing editable template.", state="error")
+            st.error(f"OpenAI error: {e}")
+            raw_out = (
+                "### Decisions\n- —\n\n"
+                "### Action Items\n- —\n\n"
+                "### Risks\n- —\n\n"
+                "### Open Questions\n- —\n\n"
+                "### Next Steps\n- —\n"
+            )
+        else:
+            status.update(label="Formatting output…")
 
-    # Enforce clean headings + sub-bullets. Then do light spacing polish if checked.
-    rendered = canonicalize_minutes(raw_out)
-    if polish:
-        # collapse any triple newlines etc. (headings already normalized)
-        rendered = re.sub(r'\n{3,}', '\n\n', rendered).strip() + "\n"
+        rendered = canonicalize_minutes(raw_out)
+        if polish:
+            rendered = re.sub(r'\n{3,}', '\n\n', rendered).strip() + "\n"
+
+        status.update(label="Done ✅", state="complete")
 
     st.subheader("Minutes")
     st.markdown(rendered)
