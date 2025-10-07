@@ -185,10 +185,8 @@ def call_openai_minutes(prompt: str) -> str:
         # Fall back to legacy SDK style
         pass
     except Exception as e:
-        # If it's not a TypeError from init/kwargs, re-raise
-        err = str(e).lower()
-        if any(k in err for k in ["quota", "insufficient", "rate", "exceeded"]):
-            raise RuntimeError("quota_exceeded")
+        # instead of mapping everything to quota_exceeded
+        st.error(f"OpenAI error: {str(e)}")
         raise
 
     # Legacy fallback
