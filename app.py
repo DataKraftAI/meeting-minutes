@@ -6,26 +6,37 @@ st.set_page_config(page_title="Meeting & Email Minutes / Besprechungsprotokoll",
 
 # ------------------------ Language bootstrap ------------------------
 def get_default_lang() -> str:
-    # Prefer URL param: ?lang=de or ?lang=en
+    # Prefer new API (st.query_params), fallback to experimental if needed
     try:
-        params = st.experimental_get_query_params()  # works on Streamlit Cloud
-        lang = (params.get("lang", ["en"])[0] or "en").lower()
-        return "de" if lang.startswith("de") else "en"
+        lang = (st.query_params.get("lang") or "en").lower()
     except Exception:
-        return "en"
+        try:
+            params = st.experimental_get_query_params()
+            lang = (params.get("lang", ["en"])[0] or "en").lower()
+        except Exception:
+            lang = "en"
+    return "de" if lang.startswith("de") else "en"
 
-LANG = st.session_state.get("lang", get_default_lang())
 if "lang" not in st.session_state:
-    st.session_state["lang"] = LANG
+    st.session_state["lang"] = get_default_lang()
 
 def set_lang(new_lang: str):
     st.session_state["lang"] = new_lang
+    # Update URL param via new API; fallback to experimental setter
+    try:
+        st.query_params["lang"] = new_lang
+    except Exception:
+        st.experimental_set_query_params(lang=new_lang)
+    st.rerun()
+
+LANG = st.session_state["lang"]
 
 # ------------------------ Localization strings ------------------------
 TXT = {
     "en": {
         "title": "📝 Meeting & Email Minutes",
         "caption": "Paste text or upload .txt / .pdf / .docx → get clean, structured minutes: Decisions, Action Items, Risks, Open Questions, Next Steps.",
+        "lang_label": "Language / Sprache",
         "sidebar_ai": "AI",
         "model": "Model: **gpt-4o-mini**",
         "audience_label": "Audience tone",
@@ -43,14 +54,10 @@ TXT = {
         "paste_help": "Tip: Paste raw meeting notes or an email chain. The app will structure it for quick sharing.",
         "upload_label": "Upload files (.txt, .pdf, .docx) — optional",
         "upload_help": "If you have notes as files, drop them here. Scanned PDFs may extract poorly.",
+        "upload_hint_below": "_Tip: You can also drag & drop files into the box above._",
         "preview": "Preview extracted text (first 5,000 chars)",
         "privacy_note": "> **Privacy note:** Nothing is stored. If AI is ON, text is sent to OpenAI **after optional masking**.",
         "btn_generate": "Generate Minutes",
-        "status_title": "Generating minutes…",
-        "status_mask": "Masking personal info…",
-        "status_call": "Calling OpenAI…",
-        "status_format": "Formatting output…",
-        "status_done": "Done ✅",
         "warn_paste": "Please paste text or upload at least one file.",
         "error_openai_prefix": "OpenAI error: ",
         "minutes_heading": "Minutes",
@@ -61,10 +68,14 @@ TXT = {
         "H_RISKS": "Risks",
         "H_QUESTIONS": "Open Questions",
         "H_NEXT": "Next Steps",
+        # Spinner text
+        "spinning": "Generating minutes…",
+        "success": "Done.",
     },
     "de": {
         "title": "📝 Besprechungsprotokoll",
         "caption": "Text einfügen oder .txt / .pdf / .docx hochladen → klare, strukturierte Protokolle: Entscheidungen, Aufgaben, Risiken, Offene Fragen, Nächste Schritte.",
+        "lang_label": "Language / Sprache",
         "sidebar_ai": "KI",
         "model": "Modell: **gpt-4o-mini**",
         "audience_label": "Adressatenton",
@@ -82,14 +93,10 @@ TXT = {
         "paste_help": "Tipp: Fügen Sie Rohnotizen oder eine E-Mail-Kette ein. Die App strukturiert alles für die schnelle Weitergabe.",
         "upload_label": "Dateien hochladen (.txt, .pdf, .docx) — optional",
         "upload_help": "Wenn Notizen als Dateien vorliegen, hier ablegen. Gescannte PDFs werden ggf. schlecht extrahiert.",
+        "upload_hint_below": "_Tipp: Dateien können auch per Drag & Drop in die Box oben gezogen werden._",
         "preview": "Vorschau des extrahierten Textes (erste 5.000 Zeichen)",
         "privacy_note": "> **Hinweis Datenschutz:** Es wird nichts gespeichert. Wenn KI aktiviert ist, wird Text **nach optionaler Anonymisierung** an OpenAI gesendet.",
         "btn_generate": "Protokoll erstellen",
-        "status_title": "Protokoll wird erstellt…",
-        "status_mask": "Personenbezogene Daten werden anonymisiert…",
-        "status_call": "OpenAI wird aufgerufen…",
-        "status_format": "Ausgabe wird formatiert…",
-        "status_done": "Fertig ✅",
         "warn_paste": "Bitte Text einfügen oder mindestens eine Datei hochladen.",
         "error_openai_prefix": "OpenAI-Fehler: ",
         "minutes_heading": "Protokoll",
@@ -100,6 +107,9 @@ TXT = {
         "H_RISKS": "Risiken",
         "H_QUESTIONS": "Offene Fragen",
         "H_NEXT": "Nächste Schritte",
+        # Spinner text
+        "spinning": "Protokoll wird erstellt…",
+        "success": "Fertig.",
     }
 }
 
@@ -109,12 +119,10 @@ with col_t:
     st.title(TXT[LANG]["title"])
     st.caption(TXT[LANG]["caption"])
 with col_lang:
-    new_lang = st.selectbox("Language / Sprache", ["English", "Deutsch"], index=(0 if LANG=="en" else 1))
+    new_lang = st.selectbox(TXT[LANG]["lang_label"], ["English", "Deutsch"], index=(0 if LANG=="en" else 1))
     picked = "en" if new_lang.startswith("English") else "de"
     if picked != LANG:
         set_lang(picked)
-        st.experimental_set_query_params(lang=picked)
-        st.experimental_rerun()
 
 # ===================== Sidebar (simple) =====================
 with st.sidebar:
@@ -215,17 +223,17 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
 
 # =========== Audience-specific prompt builder (EN + DE) ===========
 def build_prompt(audience_label: str, raw: str, lang: str) -> str:
+    TXTloc = TXT[lang]
     if lang == "de":
-        # Map localized audience labels back to styles
-        if audience_label == TXT["de"]["aud_exec"]:
+        if audience_label == TXTloc["aud_exec"]:
             style = ("Schreiben Sie kurz und auf Management-Ebene. "
                      "Fokus auf Entscheidungen, Zusagen und Termine. "
                      "Vermeiden Sie technischen Jargon oder Nebensächlichkeiten.")
-        elif audience_label == TXT["de"]["aud_tech"]:
+        elif audience_label == TXTloc["aud_tech"]:
             style = ("Schreiben Sie mit detaillierten Erklärungen. "
                      "Beziehen Sie technische Aufgaben, System-Abhängigkeiten und Implementierungs-Hinweise ein, sofern vorhanden. "
                      "Nutzen Sie Fachbegriffe, falls sie im Text vorkommen.")
-        else:  # Betrieb
+        else:
             style = ("Schreiben Sie prozess- und logistikorientiert. "
                      "Betonen Sie Risiken, Abhängigkeiten, Übergaben und Zeitpläne. "
                      "Machen Sie Aufgaben und Verantwortlichkeiten sehr deutlich.")
@@ -234,19 +242,19 @@ def build_prompt(audience_label: str, raw: str, lang: str) -> str:
 
 Strukturieren Sie den Text in folgendes Markdown-Layout — kein zusätzlicher Text davor oder danach:
 
-### {TXT['de']['H_DECISIONS']}
+### {TXTloc['H_DECISIONS']}
 - punkt
 
-### {TXT['de']['H_ACTIONS']}
+### {TXTloc['H_ACTIONS']}
 - Verantwortlich: <Name oder [name_1]> — Aufgabe … (Termin: <Datum oder (?)>)
 
-### {TXT['de']['H_RISKS']}
+### {TXTloc['H_RISKS']}
 - punkt
 
-### {TXT['de']['H_QUESTIONS']}
+### {TXTloc['H_QUESTIONS']}
 - punkt
 
-### {TXT['de']['H_NEXT']}
+### {TXTloc['H_NEXT']}
 - punkt
 
 Regeln:
@@ -259,16 +267,15 @@ Zu strukturierender Text:
 {raw}
 """
     else:
-        # English
-        if audience_label == TXT["en"]["aud_exec"]:
+        if audience_label == TXTloc["aud_exec"]:
             style = ("Write in concise, high-level language. "
                      "Focus on key business decisions, commitments, and deadlines. "
                      "Avoid technical jargon or minor details.")
-        elif audience_label == TXT["en"]["aud_tech"]:
+        elif audience_label == TXTloc["aud_tech"]:
             style = ("Write with detailed explanations. "
                      "Include technical tasks, system dependencies, and implementation notes where present. "
                      "Use domain-specific terminology if found in the text.")
-        else:  # Operations
+        else:
             style = ("Write in a process- and logistics-focused style. "
                      "Emphasize risks, dependencies, handoffs, and schedules. "
                      "Make action steps and responsibilities very explicit.")
@@ -277,19 +284,19 @@ Zu strukturierender Text:
 
 Rewrite the text into business minutes using EXACTLY this Markdown layout — no extra text above or below:
 
-### {TXT['en']['H_DECISIONS']}
+### {TXTloc['H_DECISIONS']}
 - item
 
-### {TXT['en']['H_ACTIONS']}
+### {TXTloc['H_ACTIONS']}
 - Owner: <name or [name_1]> — Task … (Deadline: <date or (?)>)
 
-### {TXT['en']['H_RISKS']}
+### {TXTloc['H_RISKS']}
 - item
 
-### {TXT['en']['H_QUESTIONS']}
+### {TXTloc['H_QUESTIONS']}
 - item
 
-### {TXT['en']['H_NEXT']}
+### {TXTloc['H_NEXT']}
 - item
 
 Rules:
@@ -304,12 +311,10 @@ Text to structure:
 
 # ====================== Post-processor (canonical layout) ====================
 def canonicalize_minutes(md: str, lang: str) -> str:
-    if lang == "de":
-        H = [TXT["de"]["H_DECISIONS"], TXT["de"]["H_ACTIONS"], TXT["de"]["H_RISKS"], TXT["de"]["H_QUESTIONS"], TXT["de"]["H_NEXT"]]
-    else:
-        H = [TXT["en"]["H_DECISIONS"], TXT["en"]["H_ACTIONS"], TXT["en"]["H_RISKS"], TXT["en"]["H_QUESTIONS"], TXT["en"]["H_NEXT"]]
+    TXTloc = TXT[lang]
+    H = [TXTloc["H_DECISIONS"], TXTloc["H_ACTIONS"], TXTloc["H_RISKS"], TXTloc["H_QUESTIONS"], TXTloc["H_NEXT"]]
 
-    lines = [ln.rstrip() for ln in md.strip().splitlines()]
+    lines = [ln.rstrip() for ln in (md or "").strip().splitlines()]
     out = []
     current = None
 
@@ -328,20 +333,14 @@ def canonicalize_minutes(md: str, lang: str) -> str:
         m = heading_pat.match(txt)
         if m:
             current = m.group(1)
-            if current in H:
-                emit_heading(current)
-            else:
-                current = None
+            emit_heading(current)
             continue
 
         star_stripped = re.sub(r'^\*+|\*+$', '', txt).strip()
         m2 = heading_pat.match(star_stripped)
         if m2:
             current = m2.group(1)
-            if current in H:
-                emit_heading(current)
-            else:
-                current = None
+            emit_heading(current)
             continue
 
         if current is None:
@@ -393,7 +392,7 @@ with c1:
     raw = st.text_area(
         TXT[LANG]["paste_label"],
         height=260,
-        placeholder="Paste here…" if LANG=="en" else "Hier einfügen…",
+        placeholder=("Paste here…" if LANG=="en" else "Hier einfügen…"),
         help=TXT[LANG]["paste_help"]
     )
 with c2:
@@ -403,6 +402,8 @@ with c2:
         accept_multiple_files=True,
         help=TXT[LANG]["upload_help"]
     )
+    # Extra hint since the internal dropzone text isn't localizable
+    st.caption(TXT[LANG]["upload_hint_below"])
 
 uploaded_texts: List[str] = []
 if files:
@@ -422,28 +423,25 @@ with st.expander(TXT[LANG]["preview"], expanded=False):
 
 st.markdown(TXT[LANG]["privacy_note"])
 
-# ================================== Action (with BIG progress box) ==========
+# ================================== Action (spinner + toast) ================
 generate = st.button(TXT[LANG]["btn_generate"], type="primary")
 if generate:
     if not full_text.strip():
         st.warning(TXT[LANG]["warn_paste"])
         st.stop()
 
-    with st.status(TXT[LANG]["status_title"], expanded=True) as status:
-        status.update(label=TXT[LANG]["status_mask"])
+    with st.spinner(TXT[LANG]["spinning"]):
+        # Mask BEFORE any AI usage
         if mask_pii:
             processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
         else:
             processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
 
-        status.update(label=TXT[LANG]["status_call"])
         try:
             prompt = build_prompt(audience, processed_text, LANG)
             raw_out = call_openai_minutes(prompt)
         except Exception as e:
-            status.update(label="OpenAI error — showing editable template." if LANG=="en" else "OpenAI-Fehler — bearbeitbare Vorlage wird angezeigt.", state="error")
             st.error(TXT[LANG]["error_openai_prefix"] + str(e))
-            # Fallback template in correct language
             raw_out = (
                 f"### {TXT[LANG]['H_DECISIONS']}\n- —\n\n"
                 f"### {TXT[LANG]['H_ACTIONS']}\n- —\n\n"
@@ -451,14 +449,12 @@ if generate:
                 f"### {TXT[LANG]['H_QUESTIONS']}\n- —\n\n"
                 f"### {TXT[LANG]['H_NEXT']}\n- —\n"
             )
-        else:
-            status.update(label=TXT[LANG]["status_format"])
 
         rendered = canonicalize_minutes(raw_out, LANG)
         if polish:
             rendered = re.sub(r'\n{3,}', '\n\n', rendered).strip() + "\n"
 
-        status.update(label=TXT[LANG]["status_done"], state="complete")
+    st.success(TXT[LANG]["success"])
 
     st.subheader(TXT[LANG]["minutes_heading"])
     st.markdown(rendered)
