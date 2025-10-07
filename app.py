@@ -6,7 +6,7 @@ st.set_page_config(page_title="Meeting & Email Minutes", layout="wide")
 st.title("📝 Meeting & Email Minutes")
 st.caption("Paste text or upload .txt / .pdf / .docx → get clean, structured minutes: Decisions, Action Items, Risks, Open Questions, Next Steps.")
 
-# ===================== Sidebar (kept simple) =====================
+# ===================== Sidebar (simple) =====================
 with st.sidebar:
     st.subheader("AI")
     st.write("Model: **gpt-4o-mini**")
@@ -19,7 +19,7 @@ with st.sidebar:
     polish = st.checkbox(
         "Keep bullets tidy (recommended)",
         value=True,
-        help="Cleans small formatting issues like list bullets and spacing."
+        help="Cleans spacing and guarantees bullets only under headings — never on headings."
     )
     st.markdown("---")
     mask_pii = st.checkbox(
@@ -28,18 +28,7 @@ with st.sidebar:
         help="Replaces emails, phone numbers, and names with tags like [email_1], [phone_1], [name_1] BEFORE any AI call."
     )
 
-# ========================== Small formatting helper ==========================
-def normalize_markdown(txt: str) -> str:
-    if not txt:
-        return ""
-    t = txt.strip()
-    t = re.sub(r'^[\s•*·]\s*', "- ", t, flags=re.MULTILINE)     # unify bullets
-    t = re.sub(r'^\s*(\d+)[\)\.]\s+', r'\1. ', t, flags=re.MULTILINE)  # numbered lists
-    t = re.sub(r'(\*\*[^*]+?\*\*)(?!\n\n)', r'\1\n', t)         # blank line after headings
-    t = re.sub(r'\n{3,}', '\n\n', t)                            # collapse >2 blank lines
-    return t
-
-# ============================ PII masking helpers ============================
+# ============================ PII masking ============================
 EMAIL_RE = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.I)
 PHONE_RE = re.compile(r'(\+?\d[\d\-\s\(\)]{7,}\d)')
 NAME_CANDIDATE_RE = re.compile(r'\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,2})\b')
@@ -125,6 +114,127 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
             parts.append(t.strip())
     return "\n\n---\n\n".join(parts)
 
+# ============================= Prompt (strict format) ========================
+def build_prompt(audience: str, raw: str) -> str:
+    return f"""You are a precise note-taker. Audience: {audience}.
+Rewrite the text into business minutes using EXACTLY this Markdown layout — no extra text above or below, no italics, no trailing asterisks:
+
+### Decisions
+- item
+
+### Action Items
+- Owner: <name or [name_1]> — Task … (Deadline: <date or (?)>)
+
+### Risks
+- item
+
+### Open Questions
+- item
+
+### Next Steps
+- item
+
+Rules:
+- Use headings exactly as written above (no colons, no bold/italics).
+- Under each heading, use '-' bullets only for the items.
+- Keep it concise and non-generic.
+- If the owner or deadline is unclear, write '(?)'.
+- Do not include “Minutes”, “Summary”, or any other heading.
+- Do not add any other sections.
+
+Text to structure:
+{raw}
+"""
+
+# ====================== Post-processor (canonical layout) ====================
+HEADINGS = ["Decisions", "Action Items", "Risks", "Open Questions", "Next Steps"]
+
+def canonicalize_minutes(md: str) -> str:
+    """
+    Convert any model quirks into the exact heading + bullets shape:
+    - Normalize headings to '### <Heading>'
+    - Never bullet the headings
+    - Bullet only lines under a known section
+    - Strip stray '*' around headings
+    """
+    lines = [ln.rstrip() for ln in md.strip().splitlines()]
+    out = []
+    current = None
+
+    # patterns that should map to a heading
+    heading_pat = re.compile(r'^\s*[*_#\-\s]*\s*(Decisions|Action Items|Risks|Open Questions|Next Steps)\s*:?\s*[*_#\s]*$', re.I)
+    # bullets we accept for items
+    item_lead_pat = re.compile(r'^\s*[-•*·]\s*')
+
+    def emit_heading(h: str):
+        out.append(f"### {h}")
+        out.append("")  # blank line after heading
+
+    for raw in lines:
+        txt = raw.strip()
+
+        # skip empty lines unless we need a spacer after heading
+        if not txt:
+            continue
+
+        m = heading_pat.match(txt)
+        if m:
+            current = m.group(1).title()
+            if current not in HEADINGS:
+                current = None
+                continue
+            emit_heading(current)
+            continue
+
+        # if the model included something like "**Decisions**" inline
+        star_stripped = re.sub(r'^\*+|\*+$', '', txt).strip()
+        m2 = heading_pat.match(star_stripped)
+        if m2:
+            current = m2.group(1).title()
+            if current in HEADINGS:
+                emit_heading(current)
+            else:
+                current = None
+            continue
+
+        # If not inside a section yet, try to detect a "Minutes"/noise line and skip
+        if current is None:
+            maybe_heading = heading_pat.match(txt)
+            if maybe_heading:
+                current = maybe_heading.group(1).title()
+                emit_heading(current)
+            else:
+                # ignore non-section lines above the first heading
+                continue
+        else:
+            # We are inside a known section -> add as bullet
+            item = item_lead_pat.sub("", txt)  # remove any leading bullet chars
+            if item and not item.startswith("###"):
+                out.append(f"- {item}")
+
+    # Ensure all sections exist (for consistent look)
+    present = set([ln[4:] for ln in out if ln.startswith("### ")])
+    for h in HEADINGS:
+        if h not in present:
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"### {h}")
+            out.append("")
+            out.append("- —")
+
+    # Collapse excess blank lines
+    final = []
+    prev_blank = False
+    for ln in out:
+        if ln == "":
+            if prev_blank:
+                continue
+            prev_blank = True
+        else:
+            prev_blank = False
+        final.append(ln)
+    return "\n".join(final).strip() + "\n"
+
 # ============================= OpenAI (legacy SDK) ===========================
 def call_openai_minutes(prompt: str) -> str:
     """
@@ -142,30 +252,9 @@ def call_openai_minutes(prompt: str) -> str:
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
-        max_tokens=700,
+        max_tokens=800,
     )
     return resp["choices"][0]["message"]["content"].strip()
-
-# ================================ Prompt builder =============================
-def build_prompt(audience: str, raw: str) -> str:
-    return f"""You are a precise note-taker. Audience: {audience}.
-Structure the following text into concise minutes.
-
-Sections:
-- **Decisions**
-- **Action Items** (Owner, Deadline)
-- **Risks**
-- **Open Questions**
-- **Next Steps** (short bullet list)
-
-Rules:
-- No fluff. Use bullet points.
-- If owners/dates are missing, infer placeholders and mark with (?).
-- Keep it business-friendly.
-
-Text:
-{raw}
-"""
 
 # ================================== Inputs ==================================
 c1, c2 = st.columns([1,1])
@@ -174,7 +263,7 @@ with c1:
         "Paste meeting transcript or email thread",
         height=260,
         placeholder="Paste here…",
-        help="Tip: You can paste raw meeting notes or an email chain. The app will structure it for quick sharing."
+        help="Tip: Paste raw meeting notes or an email chain. The app will structure it for quick sharing."
     )
 with c2:
     files = st.file_uploader(
@@ -201,8 +290,7 @@ with st.expander("Preview extracted text (first 5,000 chars)", expanded=False):
     st.write(full_text[:5000] if full_text else "—")
 
 st.markdown(
-    "> **Privacy note:** Nothing is stored. If AI is ON, text is sent to OpenAI **after optional masking**. "
-    "If no key is configured, the app shows a clean minutes template you can edit."
+    "> **Privacy note:** Nothing is stored. If AI is ON, text is sent to OpenAI **after optional masking**."
 )
 
 # ================================== Action ==================================
@@ -211,29 +299,33 @@ if st.button("Generate Minutes"):
         st.warning("Please paste text or upload at least one file.")
         st.stop()
 
-    # Mask BEFORE any AI usage (if enabled)
+    # Mask BEFORE any AI usage
     if mask_pii:
         processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
     else:
         processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
 
-    # Try AI; if missing key or API error, fall back to editable template
     try:
         prompt = build_prompt(audience, processed_text)
         raw_out = call_openai_minutes(prompt)
     except Exception as e:
         st.error(f"OpenAI error: {e}")
         raw_out = (
-            "**Decisions**\n- —\n\n"
-            "**Action Items (Owner, Deadline)**\n- —\n\n"
-            "**Risks**\n- —\n\n"
-            "**Open Questions**\n- —\n\n"
-            "**Next Steps**\n- —"
+            "### Decisions\n- —\n\n"
+            "### Action Items\n- —\n\n"
+            "### Risks\n- —\n\n"
+            "### Open Questions\n- —\n\n"
+            "### Next Steps\n- —\n"
         )
 
-    output = normalize_markdown(raw_out) if polish else raw_out
+    # Enforce clean headings + sub-bullets. Then do light spacing polish if checked.
+    rendered = canonicalize_minutes(raw_out)
+    if polish:
+        # collapse any triple newlines etc. (headings already normalized)
+        rendered = re.sub(r'\n{3,}', '\n\n', rendered).strip() + "\n"
+
     st.subheader("Minutes")
-    st.markdown(output)
+    st.markdown(rendered)
 
     with st.expander("Masking summary (no raw PII shown)", expanded=False):
         st.write(f"- Emails masked: {email_cnt}")
