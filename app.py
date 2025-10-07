@@ -1,4 +1,4 @@
-import re, io
+import os, re, io
 from typing import List, Dict, Tuple
 import streamlit as st
 
@@ -13,24 +13,18 @@ st.set_page_config(page_title="Meeting & Email Minutes", layout="wide")
 st.title("📝 Meeting & Email Minutes")
 st.caption("Paste text or upload .txt / .pdf / .docx → get clean, structured minutes: Decisions, Action Items, Risks, Open Questions, Next Steps.")
 
-# ===================== Sidebar (with plain-English hints) =====================
+# ===================== Sidebar (plain-English hints) =====================
 with st.sidebar:
-    st.subheader("AI Settings")
+    st.subheader("AI")
     use_ai = st.checkbox(
-        "Use AI to structure minutes",
-        value=False,
-        help="If ON, the app sends the text to OpenAI to produce structured minutes. If OFF, no data leaves this browser session."
+        "Use AI (OpenAI)",
+        value=True,
+        help="If ON, the app uses OpenAI to structure minutes. Your API key is read securely from Streamlit 'Secrets'."
     )
-    api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        help="Only needed if 'Use AI' is ON. Your key is used for this session only and never stored."
-    ) if use_ai else None
-
     audience = st.selectbox(
         "Audience tone",
         ["Executive", "Operations", "Technical"],
-        help="Shapes the writing style of the minutes (e.g., concise for executives, detail-focused for technical)."
+        help="Shapes the writing style (concise for execs, detail for technical)."
     )
 
     st.markdown("---")
@@ -38,7 +32,7 @@ with st.sidebar:
     polish = st.checkbox(
         "Keep bullets tidy (recommended)",
         value=True,
-        help="Cleans up small formatting issues like list bullets and spacing for a neat, business-friendly look."
+        help="Cleans small formatting issues like list bullets and spacing."
     )
 
     st.markdown("---")
@@ -50,11 +44,11 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("No-AI Mode")
+    st.subheader("No-AI Extraction")
     local_heuristics = st.checkbox(
-        "Use smart local extraction when AI is OFF",
+        "If AI is OFF, extract with simple rules",
         value=True,
-        help="If AI is OFF, the app still extracts obvious Decisions, Action Items, Risks, etc. using simple pattern rules — no external services."
+        help="Pure Python rules (no external services) to pull obvious Decisions, Action Items, Risks, etc."
     )
 
 # ========================== Small formatting helper ==========================
@@ -160,7 +154,6 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
     return "\n\n---\n\n".join(parts)
 
 # ========================== Local (no-AI) extractor ==========================
-# Simple date patterns: ISO, dd/mm/yyyy, mm/dd/yyyy, 6 Oct 2025, Oct 6, 2025, etc.
 DATE_PAT = re.compile(
     r'\b('
     r'\d{4}-\d{2}-\d{2}'                      # 2025-10-06
@@ -171,15 +164,37 @@ DATE_PAT = re.compile(
     re.I
 )
 
-def pick_deadline(text: str) -> str:
-    m = DATE_PAT.search(text)
-    return m.group(0) if m else "(?)"
+OWNER_PAT = re.compile(r'\[(name_\d+)\]', re.I)  # after masking
+CAP_OWNER_PAT = re.compile(r'\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2})\b')  # if masking off
 
-def local_extract(text: str) -> Dict[str, List[str]]:
-    """
-    Heuristic extractor (no AI). Looks for obvious patterns only.
-    Returns a dict with sections -> list of lines.
-    """
+ACTION_VERBS = r'(?:will|shall|must|to|own|draft|update|finalize|coordinate|prepare|send|review|implement|fix|deliver|publish|clarify)'
+DEADLINE_HINTS = r'(?:by|before|on|due|no later than|target (?:date|deadline) is|target is|goal is|target:|deadline:)'
+
+def find_deadline(text: str) -> str:
+    # priority: explicit date near deadline hints; else any date in sentence; else "?"
+    hint = re.search(rf'{DEADLINE_HINTS}[^\.:\n]*', text, re.I)
+    if hint:
+        m = DATE_PAT.search(hint.group(0))
+        if m:
+            return m.group(0)
+    m2 = DATE_PAT.search(text)
+    return m2.group(0) if m2 else "(?)"
+
+def sentencize(text: str) -> List[str]:
+    # split by line breaks and sentence punctuation, keep medium granularity
+    chunks = []
+    for block in text.splitlines():
+        block = block.strip()
+        if not block:
+            continue
+        parts = re.split(r'(?<=[\.\!\?])\s+(?=[A-Z\[])', block)
+        for p in parts:
+            p = p.strip()
+            if p:
+                chunks.append(p)
+    return chunks
+
+def local_extract(text: str, masking_active: bool) -> Dict[str, List[str]]:
     sections = {
         "Decisions": [],
         "Action Items (Owner, Deadline)": [],
@@ -188,39 +203,71 @@ def local_extract(text: str) -> Dict[str, List[str]]:
         "Next Steps": []
     }
 
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    # Heading-based buckets (e.g., "Risks:", "Next steps:", "Open questions:")
+    lines = [ln.strip() for ln in text.splitlines()]
+    current = None
     for ln in lines:
-        low = ln.lower()
+        low = ln.lower().strip()
+        if not low:
+            current = None
+            continue
+        if low.startswith(("risks:", "risk:")):
+            current = "Risks"; continue
+        if low.startswith(("next steps:", "next step:", "follow-up:", "follow up:")):
+            current = "Next Steps"; continue
+        if low.startswith(("open questions:", "open question:", "questions:")):
+            current = "Open Questions"; continue
+        if low.startswith(("decisions:", "decision:")):
+            current = "Decisions"; continue
+
+        if current in ("Risks","Next Steps","Open Questions","Decisions"):
+            # Avoid echoing the heading itself
+            if ln and not re.match(r'^(risks?|next steps?|follow-?up|open questions?|questions?):\s*$', ln, re.I):
+                bullet = f"- {ln}" if not ln.startswith("-") else ln
+                sections[current].append(bullet)
+
+    # Sentence-level rules
+    for s in sentencize(text):
+        low = s.lower()
 
         # Decisions
-        if low.startswith("decision:") or "we decided" in low or "we agreed" in low or low.startswith("decisions:"):
-            sections["Decisions"].append(f"- {ln}")
+        if "we agreed" in low or "we decided" in low or low.startswith("decision:"):
+            sections["Decisions"].append(f"- {s}")
             continue
 
-        # Action Items (look for common markers or [name_X] taking an action)
-        if low.startswith(("action:", "actions:", "to do:", "todo:", "task:", "tasks:", "owner:", "owners:", "ai:")) \
-           or re.search(r'\[name_\d+\].{0,20}\b(will|to|must|should|own|handle|fix|implement|prepare|send|review)\b', low):
-            owner = re.search(r'\[name_\d+\]', ln)
-            owner_txt = owner.group(0) if owner else "[name_(?)]"
-            deadline = pick_deadline(ln) if ("by " in low or "due " in low or DATE_PAT.search(ln)) else "(?)"
-            clean = re.sub(r'^(action[s]?|to ?do|todo|task[s]?|owner[s]?):\s*', '', ln, flags=re.I)
-            sections["Action Items (Owner, Deadline)"].append(f"- {clean} (Owner: {owner_txt}, Deadline: {deadline})")
+        # Risks (keywords)
+        if "risk" in low or "blocked" in low or "blocker" in low or "jeopardize" in low or "dependency" in low or "dependent on" in low:
+            sections["Risks"].append(f"- {s}")
             continue
 
-        # Risks
-        if "risk" in low or "blocked" in low or "blocker" in low or "issue" in low or "concern" in low:
-            sections["Risks"].append(f"- {ln}")
+        # Next steps (phrases)
+        if "next steps" in low or "let’s reconvene" in low or "let's reconvene" in low or "follow up" in low:
+            sections["Next Steps"].append(f"- {s}")
             continue
 
-        # Open Questions
-        if low.startswith(("question:", "questions:")) or ln.endswith("?"):
-            sections["Open Questions"].append(f"- {ln}")
+        # Open questions (question mark)
+        if s.endswith("?"):
+            sections["Open Questions"].append(f"- {s}")
             continue
 
-        # Next Steps
-        if "next step" in low or "follow up" in low or low.startswith(("ns:", "next:", "follow-up:")):
-            sections["Next Steps"].append(f"- {ln}")
+        # Action items:
+        # 1) Masked owner like [name_1] ... will/shall/to/etc.
+        if re.search(rf'\[name_\d+\].{{0,40}}\b{ACTION_VERBS}\b', low):
+            owner_match = OWNER_PAT.search(s)
+            owner = f'[{owner_match.group(1)}]' if owner_match else "[name_(?)]"
+            deadline = find_deadline(s)
+            sections["Action Items (Owner, Deadline)"].append(f"- {s} (Owner: {owner}, Deadline: {deadline})")
             continue
+
+        # 2) If masking is OFF, try capitalized names as owners
+        if not masking_active:
+            # crude owner guess: sentence starts with Name ... verb
+            m = re.match(rf'({CAP_OWNER_PAT.pattern}).{{0,40}}\b{ACTION_VERBS}\b', s)
+            if m:
+                owner = m.group(1)
+                deadline = find_deadline(s)
+                sections["Action Items (Owner, Deadline)"].append(f"- {s} (Owner: {owner}, Deadline: {deadline})")
+                continue
 
     return sections
 
@@ -228,7 +275,14 @@ def render_sections(sections: Dict[str, List[str]]) -> str:
     def block(title: str, items: List[str]) -> str:
         if not items:
             return f"**{title}**\n- —\n"
-        return f"**{title}**\n" + "\n".join(items) + "\n"
+        # de-duplicate while preserving order
+        seen = set()
+        cleaned = []
+        for it in items:
+            if it not in seen:
+                cleaned.append(it)
+                seen.add(it)
+        return f"**{title}**\n" + "\n".join(cleaned) + "\n"
     return (
         block("Decisions", sections.get("Decisions", [])) + "\n" +
         block("Action Items (Owner, Deadline)", sections.get("Action Items (Owner, Deadline)", [])) + "\n" +
@@ -263,7 +317,7 @@ c1, c2 = st.columns([1,1])
 with c1:
     raw = st.text_area(
         "Paste meeting transcript or email thread",
-        height=240,
+        height=260,
         placeholder="Paste here…",
         help="Tip: You can paste raw meeting notes or an email chain. The app will structure it for quick sharing."
     )
@@ -305,15 +359,16 @@ if st.button("Generate Minutes"):
     # Mask BEFORE any AI usage (if enabled)
     if mask_pii:
         processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
+        masking_active = True
     else:
         processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
+        masking_active = False
 
     if use_ai:
-        if not OPENAI_READY:
-            st.error("OpenAI SDK not installed. Add `openai` to requirements.txt")
-            st.stop()
-        if not api_key:
-            st.info("Enter your OpenAI API key in the sidebar to generate minutes.")
+        # Read key from Streamlit Secrets or env — no user input
+        api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+        if not OPENAI_READY or not api_key:
+            st.error("This demo is temporarily unavailable (missing OpenAI key). Please try again later.")
             st.stop()
 
         try:
@@ -334,13 +389,11 @@ if st.button("Generate Minutes"):
                 st.error(f"OpenAI error: {e}")
             st.stop()
     else:
-        # No-AI mode
+        # No-AI mode: rule-based extraction or simple template
         if local_heuristics:
-            # Use the smart local extractor (regex/patterns only)
-            sections = local_extract(processed_text)
+            sections = local_extract(processed_text, masking_active=masking_active)
             raw_out = render_sections(sections)
         else:
-            # Simple editable template
             raw_out = (
                 "**Decisions**\n- —\n\n"
                 "**Action Items (Owner, Deadline)**\n- —\n\n"
@@ -360,4 +413,3 @@ if st.button("Generate Minutes"):
             st.write(f"- Names masked: {len(name_map)} → {[name_map[k] for k in name_map]}")
         else:
             st.write("- Names masked: 0")
-
