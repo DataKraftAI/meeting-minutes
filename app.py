@@ -138,6 +138,43 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
             parts.append(t.strip())
     return "\n\n---\n\n".join(parts)
 
+# ============================= OpenAI caller (raw errors) ====================
+def call_openai_minutes(prompt: str) -> str:
+    """
+    Uses your OPENAI_API_KEY from Streamlit Secrets or env.
+    Tries new SDK first; if import/type errors, falls back to legacy.
+    On error, raises the original exception so the UI can display it verbatim.
+    """
+    api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
+
+    # Try new SDK
+    try:
+        from openai import OpenAI  # new SDK
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=700
+        )
+        return resp.choices[0].message.content.strip()
+    except (TypeError, AttributeError):
+        # Fall back to legacy SDK signature
+        pass
+
+    # Legacy fallback
+    import openai as openai_legacy
+    openai_legacy.api_key = api_key
+    resp = openai_legacy.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=700,
+    )
+    return resp["choices"][0]["message"]["content"].strip()
+
 # ================================ Prompt builder =============================
 def build_prompt(audience: str, raw: str) -> str:
     return f"""You are a precise note-taker. Audience: {audience}.
@@ -158,53 +195,6 @@ Rules:
 Text:
 {raw}
 """
-
-# ============================= OpenAI caller (robust) ========================
-def call_openai_minutes(prompt: str) -> str:
-    """
-    Use new SDK if available; else fall back to legacy.
-    Reads OPENAI_API_KEY from Streamlit Secrets or env.
-    """
-    api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-    if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
-
-    # Try new SDK first
-    try:
-        from openai import OpenAI  # new SDK
-        client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=700
-        )
-        return resp.choices[0].message.content.strip()
-    except TypeError as e:
-        # Handle proxy/keyword mismatch like: Client.init() got unexpected keyword 'proxies'
-        # Fall back to legacy SDK style
-        pass
-    except Exception as e:
-        # instead of mapping everything to quota_exceeded
-        st.error(f"OpenAI error: {str(e)}")
-        raise
-
-    # Legacy fallback
-    try:
-        import openai as openai_legacy
-        openai_legacy.api_key = api_key
-        resp = openai_legacy.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=700,
-        )
-        return resp["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        err = str(e).lower()
-        if any(k in err for k in ["quota", "insufficient", "rate", "exceeded"]):
-            raise RuntimeError("quota_exceeded")
-        raise
 
 # ================================== Inputs ==================================
 c1, c2 = st.columns([1,1])
@@ -260,18 +250,12 @@ if st.button("Generate Minutes"):
         try:
             prompt = build_prompt(audience, processed_text)
             raw_out = call_openai_minutes(prompt)
-        except RuntimeError as rte:
-            if str(rte) == "quota_exceeded":
-                st.warning("⚠️ Demo limit exceeded for this month. Please check back next month.")
-                st.stop()
-            else:
-                st.error(str(rte))
-                st.stop()
         except Exception as e:
+            # Show the exact error from OpenAI (rate limit, quota, etc.)
             st.error(f"OpenAI error: {e}")
             st.stop()
     else:
-        # No AI: show a clean, editable template (no weak heuristics)
+        # No AI: simple editable template (no heuristics)
         raw_out = (
             "**Decisions**\n- —\n\n"
             "**Action Items (Owner, Deadline)**\n- —\n\n"
