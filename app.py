@@ -138,42 +138,30 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
             parts.append(t.strip())
     return "\n\n---\n\n".join(parts)
 
-# ============================= OpenAI caller (raw errors) ====================
+# ============================= OpenAI caller (new SDK only) ==================
 def call_openai_minutes(prompt: str) -> str:
     """
-    Uses your OPENAI_API_KEY from Streamlit Secrets or env.
-    Tries new SDK first; if import/type errors, falls back to legacy.
-    On error, raises the original exception so the UI can display it verbatim.
+    Uses OpenAI Python SDK >=1.0 only.
+    Reads OPENAI_API_KEY from Streamlit Secrets or env.
+    Sets env var then calls OpenAI() with no kwargs to avoid proxy kwarg issues.
     """
     api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
 
-    # Try new SDK
-    try:
-        from openai import OpenAI  # new SDK
-        client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=700
-        )
-        return resp.choices[0].message.content.strip()
-    except (TypeError, AttributeError):
-        # Fall back to legacy SDK signature
-        pass
+    # Put the key into env so OpenAI() can pick it up with no kwargs
+    os.environ["OPENAI_API_KEY"] = api_key
 
-    # Legacy fallback
-    import openai as openai_legacy
-    openai_legacy.api_key = api_key
-    resp = openai_legacy.ChatCompletion.create(
+    from openai import OpenAI
+    client = OpenAI()  # no kwargs
+
+    resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
-        max_tokens=700,
+        max_tokens=700
     )
-    return resp["choices"][0]["message"]["content"].strip()
+    return resp.choices[0].message.content.strip()
 
 # ================================ Prompt builder =============================
 def build_prompt(audience: str, raw: str) -> str:
@@ -251,7 +239,7 @@ if st.button("Generate Minutes"):
             prompt = build_prompt(audience, processed_text)
             raw_out = call_openai_minutes(prompt)
         except Exception as e:
-            # Show the exact error from OpenAI (rate limit, quota, etc.)
+            # Show the exact error from OpenAI (rate limit, quota, auth, etc.)
             st.error(f"OpenAI error: {e}")
             st.stop()
     else:
