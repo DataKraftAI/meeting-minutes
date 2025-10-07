@@ -2,13 +2,6 @@ import os, re, io
 from typing import List, Dict, Tuple
 import streamlit as st
 
-# -------- Optional OpenAI (the app still works without it) --------
-try:
-    from openai import OpenAI
-    OPENAI_READY = True
-except Exception:
-    OPENAI_READY = False
-
 st.set_page_config(page_title="Meeting & Email Minutes", layout="wide")
 st.title("📝 Meeting & Email Minutes")
 st.caption("Paste text or upload .txt / .pdf / .docx → get clean, structured minutes: Decisions, Action Items, Risks, Open Questions, Next Steps.")
@@ -41,14 +34,6 @@ with st.sidebar:
         "Hide personal info before processing",
         value=True,
         help="Replaces emails, phone numbers, and names with tags like [email_1], [phone_1], [name_1] BEFORE any AI call."
-    )
-
-    st.markdown("---")
-    st.subheader("No-AI Extraction")
-    local_heuristics = st.checkbox(
-        "If AI is OFF, extract with simple rules",
-        value=True,
-        help="Pure Python rules (no external services) to pull obvious Decisions, Action Items, Risks, etc."
     )
 
 # ========================== Small formatting helper ==========================
@@ -153,144 +138,6 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
             parts.append(t.strip())
     return "\n\n---\n\n".join(parts)
 
-# ========================== Local (no-AI) extractor ==========================
-DATE_PAT = re.compile(
-    r'\b('
-    r'\d{4}-\d{2}-\d{2}'                      # 2025-10-06
-    r'|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'         # 06/10/2025 or 6-10-25
-    r'|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.? \d{1,2},? \d{2,4}'  # Oct 6, 2025
-    r'|\d{1,2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.? \d{2,4}'    # 6 Oct 2025
-    r')\b',
-    re.I
-)
-
-OWNER_PAT = re.compile(r'\[(name_\d+)\]', re.I)  # after masking
-CAP_OWNER_PAT = re.compile(r'\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2})\b')  # if masking off
-
-ACTION_VERBS = r'(?:will|shall|must|to|own|draft|update|finalize|coordinate|prepare|send|review|implement|fix|deliver|publish|clarify)'
-DEADLINE_HINTS = r'(?:by|before|on|due|no later than|target (?:date|deadline) is|target is|goal is|target:|deadline:)'
-
-def find_deadline(text: str) -> str:
-    # priority: explicit date near deadline hints; else any date in sentence; else "?"
-    hint = re.search(rf'{DEADLINE_HINTS}[^\.:\n]*', text, re.I)
-    if hint:
-        m = DATE_PAT.search(hint.group(0))
-        if m:
-            return m.group(0)
-    m2 = DATE_PAT.search(text)
-    return m2.group(0) if m2 else "(?)"
-
-def sentencize(text: str) -> List[str]:
-    # split by line breaks and sentence punctuation, keep medium granularity
-    chunks = []
-    for block in text.splitlines():
-        block = block.strip()
-        if not block:
-            continue
-        parts = re.split(r'(?<=[\.\!\?])\s+(?=[A-Z\[])', block)
-        for p in parts:
-            p = p.strip()
-            if p:
-                chunks.append(p)
-    return chunks
-
-def local_extract(text: str, masking_active: bool) -> Dict[str, List[str]]:
-    sections = {
-        "Decisions": [],
-        "Action Items (Owner, Deadline)": [],
-        "Risks": [],
-        "Open Questions": [],
-        "Next Steps": []
-    }
-
-    # Heading-based buckets (e.g., "Risks:", "Next steps:", "Open questions:")
-    lines = [ln.strip() for ln in text.splitlines()]
-    current = None
-    for ln in lines:
-        low = ln.lower().strip()
-        if not low:
-            current = None
-            continue
-        if low.startswith(("risks:", "risk:")):
-            current = "Risks"; continue
-        if low.startswith(("next steps:", "next step:", "follow-up:", "follow up:")):
-            current = "Next Steps"; continue
-        if low.startswith(("open questions:", "open question:", "questions:")):
-            current = "Open Questions"; continue
-        if low.startswith(("decisions:", "decision:")):
-            current = "Decisions"; continue
-
-        if current in ("Risks","Next Steps","Open Questions","Decisions"):
-            # Avoid echoing the heading itself
-            if ln and not re.match(r'^(risks?|next steps?|follow-?up|open questions?|questions?):\s*$', ln, re.I):
-                bullet = f"- {ln}" if not ln.startswith("-") else ln
-                sections[current].append(bullet)
-
-    # Sentence-level rules
-    for s in sentencize(text):
-        low = s.lower()
-
-        # Decisions
-        if "we agreed" in low or "we decided" in low or low.startswith("decision:"):
-            sections["Decisions"].append(f"- {s}")
-            continue
-
-        # Risks (keywords)
-        if "risk" in low or "blocked" in low or "blocker" in low or "jeopardize" in low or "dependency" in low or "dependent on" in low:
-            sections["Risks"].append(f"- {s}")
-            continue
-
-        # Next steps (phrases)
-        if "next steps" in low or "let’s reconvene" in low or "let's reconvene" in low or "follow up" in low:
-            sections["Next Steps"].append(f"- {s}")
-            continue
-
-        # Open questions (question mark)
-        if s.endswith("?"):
-            sections["Open Questions"].append(f"- {s}")
-            continue
-
-        # Action items:
-        # 1) Masked owner like [name_1] ... will/shall/to/etc.
-        if re.search(rf'\[name_\d+\].{{0,40}}\b{ACTION_VERBS}\b', low):
-            owner_match = OWNER_PAT.search(s)
-            owner = f'[{owner_match.group(1)}]' if owner_match else "[name_(?)]"
-            deadline = find_deadline(s)
-            sections["Action Items (Owner, Deadline)"].append(f"- {s} (Owner: {owner}, Deadline: {deadline})")
-            continue
-
-        # 2) If masking is OFF, try capitalized names as owners
-        if not masking_active:
-            # crude owner guess: sentence starts with Name ... verb
-            m = re.match(rf'({CAP_OWNER_PAT.pattern}).{{0,40}}\b{ACTION_VERBS}\b', s)
-            if m:
-                owner = m.group(1)
-                deadline = find_deadline(s)
-                sections["Action Items (Owner, Deadline)"].append(f"- {s} (Owner: {owner}, Deadline: {deadline})")
-                continue
-
-    return sections
-
-def render_sections(sections: Dict[str, List[str]]) -> str:
-    def block(title: str, items: List[str]) -> str:
-        if not items:
-            return f"**{title}**\n- —\n"
-        # de-duplicate while preserving order
-        seen = set()
-        cleaned = []
-        for it in items:
-            if it not in seen:
-                cleaned.append(it)
-                seen.add(it)
-        return f"**{title}**\n" + "\n".join(cleaned) + "\n"
-    return (
-        block("Decisions", sections.get("Decisions", [])) + "\n" +
-        block("Action Items (Owner, Deadline)", sections.get("Action Items (Owner, Deadline)", [])) + "\n" +
-        block("Risks", sections.get("Risks", [])) + "\n" +
-        block("Open Questions", sections.get("Open Questions", [])) + "\n" +
-        block("Next Steps", sections.get("Next Steps", []))
-    )
-
 # ================================ Prompt builder =============================
 def build_prompt(audience: str, raw: str) -> str:
     return f"""You are a precise note-taker. Audience: {audience}.
@@ -311,6 +158,55 @@ Rules:
 Text:
 {raw}
 """
+
+# ============================= OpenAI caller (robust) ========================
+def call_openai_minutes(prompt: str) -> str:
+    """
+    Use new SDK if available; else fall back to legacy.
+    Reads OPENAI_API_KEY from Streamlit Secrets or env.
+    """
+    api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
+
+    # Try new SDK first
+    try:
+        from openai import OpenAI  # new SDK
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=700
+        )
+        return resp.choices[0].message.content.strip()
+    except TypeError as e:
+        # Handle proxy/keyword mismatch like: Client.init() got unexpected keyword 'proxies'
+        # Fall back to legacy SDK style
+        pass
+    except Exception as e:
+        # If it's not a TypeError from init/kwargs, re-raise
+        err = str(e).lower()
+        if any(k in err for k in ["quota", "insufficient", "rate", "exceeded"]):
+            raise RuntimeError("quota_exceeded")
+        raise
+
+    # Legacy fallback
+    try:
+        import openai as openai_legacy
+        openai_legacy.api_key = api_key
+        resp = openai_legacy.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=700,
+        )
+        return resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        err = str(e).lower()
+        if any(k in err for k in ["quota", "insufficient", "rate", "exceeded"]):
+            raise RuntimeError("quota_exceeded")
+        raise
 
 # ================================== Inputs ==================================
 c1, c2 = st.columns([1,1])
@@ -347,7 +243,7 @@ with st.expander("Preview extracted text (first 5,000 chars)", expanded=False):
 
 st.markdown(
     "> **Privacy note:** Nothing is stored. If AI is ON, text is sent to OpenAI **after optional masking**. "
-    "If AI is OFF, everything stays in this session."
+    "If AI is OFF, the app shows a clean minutes template you can edit."
 )
 
 # ================================== Action ==================================
@@ -359,48 +255,32 @@ if st.button("Generate Minutes"):
     # Mask BEFORE any AI usage (if enabled)
     if mask_pii:
         processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
-        masking_active = True
     else:
         processed_text, name_map, email_cnt, phone_cnt = full_text, {}, 0, 0
-        masking_active = False
 
     if use_ai:
-        # Read key from Streamlit Secrets or env — no user input
-        api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-        if not OPENAI_READY or not api_key:
-            st.error("This demo is temporarily unavailable (missing OpenAI key). Please try again later.")
-            st.stop()
-
         try:
-            client = OpenAI(api_key=api_key)
             prompt = build_prompt(audience, processed_text)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=700
-            )
-            raw_out = resp.choices[0].message.content.strip()
-        except Exception as e:
-            msg = str(e).lower()
-            if any(k in msg for k in ["quota", "insufficient", "rate", "exceeded"]):
+            raw_out = call_openai_minutes(prompt)
+        except RuntimeError as rte:
+            if str(rte) == "quota_exceeded":
                 st.warning("⚠️ Demo limit exceeded for this month. Please check back next month.")
+                st.stop()
             else:
-                st.error(f"OpenAI error: {e}")
+                st.error(str(rte))
+                st.stop()
+        except Exception as e:
+            st.error(f"OpenAI error: {e}")
             st.stop()
     else:
-        # No-AI mode: rule-based extraction or simple template
-        if local_heuristics:
-            sections = local_extract(processed_text, masking_active=masking_active)
-            raw_out = render_sections(sections)
-        else:
-            raw_out = (
-                "**Decisions**\n- —\n\n"
-                "**Action Items (Owner, Deadline)**\n- —\n\n"
-                "**Risks**\n- —\n\n"
-                "**Open Questions**\n- —\n\n"
-                "**Next Steps**\n- —"
-            )
+        # No AI: show a clean, editable template (no weak heuristics)
+        raw_out = (
+            "**Decisions**\n- —\n\n"
+            "**Action Items (Owner, Deadline)**\n- —\n\n"
+            "**Risks**\n- —\n\n"
+            "**Open Questions**\n- —\n\n"
+            "**Next Steps**\n- —"
+        )
 
     output = normalize_markdown(raw_out) if polish else raw_out
     st.subheader("Minutes")
