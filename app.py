@@ -13,7 +13,7 @@ with st.sidebar:
     audience = st.selectbox(
         "Audience tone",
         ["Executive", "Operations", "Technical"],
-        help="Shapes the writing style (concise for execs, detail for technical)."
+        help="Shapes the writing style (concise for execs, process for ops, detailed for technical)."
     )
     st.markdown("---")
     polish = st.checkbox(
@@ -114,10 +114,31 @@ def combine_text(pasted: str, uploaded_texts: List[str]) -> str:
             parts.append(t.strip())
     return "\n\n---\n\n".join(parts)
 
-# ============================= Prompt (strict format) ========================
+# ============================= Prompt (audience-specific style) ========================
 def build_prompt(audience: str, raw: str) -> str:
+    if audience == "Executive":
+        style = (
+            "Write in concise, high-level language. "
+            "Focus on key business decisions, commitments, and deadlines. "
+            "Avoid technical jargon or minor details."
+        )
+    elif audience == "Technical":
+        style = (
+            "Write with detailed explanations. "
+            "Include technical tasks, system dependencies, and implementation notes where present. "
+            "Use domain-specific terminology if found in the text."
+        )
+    else:  # Operations
+        style = (
+            "Write in a process- and logistics-focused style. "
+            "Emphasize risks, dependencies, handoffs, and schedules. "
+            "Make action steps and responsibilities very explicit."
+        )
+
     return f"""You are a precise note-taker. Audience: {audience}.
-Rewrite the text into business minutes using EXACTLY this Markdown layout — no extra text above or below, no italics, no trailing asterisks:
+{style}
+
+Rewrite the text into business minutes using EXACTLY this Markdown layout — no extra text above or below:
 
 ### Decisions
 - item
@@ -135,9 +156,9 @@ Rewrite the text into business minutes using EXACTLY this Markdown layout — no
 - item
 
 Rules:
-- Use headings exactly as written above (no colons, no bold/italics).
-- Under each heading, use '-' bullets only for the items.
-- Keep it concise and non-generic.
+- Use headings exactly as written above.
+- Bullets only under headings, never on headings.
+- Keep it {audience.lower()}-friendly.
 - If the owner or deadline is unclear, write '(?)'.
 - Do not include “Minutes”, “Summary”, or any other heading.
 - Do not add any other sections.
@@ -150,6 +171,13 @@ Text to structure:
 HEADINGS = ["Decisions", "Action Items", "Risks", "Open Questions", "Next Steps"]
 
 def canonicalize_minutes(md: str) -> str:
+    """
+    Convert any model quirks into the exact heading + bullets shape:
+    - Normalize headings to '### <Heading>'
+    - Never bullet the headings
+    - Bullet only lines under a known section
+    - Strip stray '*' around headings
+    """
     lines = [ln.rstrip() for ln in md.strip().splitlines()]
     out = []
     current = None
@@ -213,8 +241,12 @@ def canonicalize_minutes(md: str) -> str:
         final.append(ln)
     return "\n".join(final).strip() + "\n"
 
-# ============================= OpenAI (legacy SDK) ===========================
+# ============================= OpenAI (legacy SDK 0.28.x) ===================
 def call_openai_minutes(prompt: str) -> str:
+    """
+    Uses OpenAI Python SDK 0.28.x (ChatCompletion).
+    Reads OPENAI_API_KEY from Streamlit Secrets or env. Shows raw errors.
+    """
     api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY in Streamlit Secrets or environment.")
