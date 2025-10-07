@@ -6,7 +6,6 @@ st.set_page_config(page_title="Meeting & Email Minutes / Besprechungsprotokoll",
 
 # ------------------------ Language bootstrap ------------------------
 def get_default_lang() -> str:
-    # Prefer new API (st.query_params), fallback to experimental if needed
     try:
         lang = (st.query_params.get("lang") or "en").lower()
     except Exception:
@@ -22,7 +21,6 @@ if "lang" not in st.session_state:
 
 def set_lang(new_lang: str):
     st.session_state["lang"] = new_lang
-    # Update URL param via new API; fallback to experimental setter
     try:
         st.query_params["lang"] = new_lang
     except Exception:
@@ -50,6 +48,8 @@ TXT = {
         "privacy": "Privacy",
         "mask_label": "Hide personal info before processing",
         "mask_help": "Replaces emails, phone numbers, and names with tags like [email_1], [phone_1], [name_1] BEFORE any AI call.",
+        "mask_names_out_label": "Keep names masked in output",
+        "mask_names_out_help": "If ON, the final minutes will still show [name_1], etc. If OFF, real names are restored only in the display (emails/phones stay masked).",
         "paste_label": "Paste meeting transcript or email thread",
         "paste_help": "Tip: Paste raw meeting notes or an email chain. The app will structure it for quick sharing.",
         "upload_label": "Upload files (.txt, .pdf, .docx) — optional",
@@ -62,13 +62,11 @@ TXT = {
         "error_openai_prefix": "OpenAI error: ",
         "minutes_heading": "Minutes",
         "mask_summary": "Masking summary (no raw PII shown)",
-        # Headings
         "H_DECISIONS": "Decisions",
         "H_ACTIONS": "Action Items",
         "H_RISKS": "Risks",
         "H_QUESTIONS": "Open Questions",
         "H_NEXT": "Next Steps",
-        # Spinner text
         "spinning": "Generating minutes…",
         "success": "Done.",
     },
@@ -89,6 +87,8 @@ TXT = {
         "privacy": "Datenschutz",
         "mask_label": "Personenbezogene Daten vor der Verarbeitung ausblenden",
         "mask_help": "Ersetzt E-Mails, Telefonnummern und Namen durch Tags wie [email_1], [phone_1], [name_1], BEVOR etwas an die KI gesendet wird.",
+        "mask_names_out_label": "Namen in der Ausgabe anonym lassen",
+        "mask_names_out_help": "Wenn AN, zeigt das Ergebnis weiterhin [name_1] usw. Wenn AUS, werden echte Namen nur in der Anzeige wiederhergestellt (E-Mails/Telefone bleiben anonym).",
         "paste_label": "Besprechungsnotizen oder E-Mail-Verlauf einfügen",
         "paste_help": "Tipp: Fügen Sie Rohnotizen oder eine E-Mail-Kette ein. Die App strukturiert alles für die schnelle Weitergabe.",
         "upload_label": "Dateien hochladen (.txt, .pdf, .docx) — optional",
@@ -101,13 +101,11 @@ TXT = {
         "error_openai_prefix": "OpenAI-Fehler: ",
         "minutes_heading": "Protokoll",
         "mask_summary": "Zusammenfassung der Anonymisierung (keine Roh-PII)",
-        # Headings
         "H_DECISIONS": "Entscheidungen",
         "H_ACTIONS": "Aufgaben",
         "H_RISKS": "Risiken",
         "H_QUESTIONS": "Offene Fragen",
         "H_NEXT": "Nächste Schritte",
-        # Spinner text
         "spinning": "Protokoll wird erstellt…",
         "success": "Fertig.",
     }
@@ -134,6 +132,7 @@ with st.sidebar:
     polish = st.checkbox(TXT[LANG]["polish_label"], value=True, help=TXT[LANG]["polish_help"])
     st.markdown("---")
     mask_pii = st.checkbox(TXT[LANG]["mask_label"], value=True, help=TXT[LANG]["mask_help"])
+    keep_names_masked_out = st.checkbox(TXT[LANG]["mask_names_out_label"], value=False, help=TXT[LANG]["mask_names_out_help"])
 
 # ============================ PII masking ============================
 EMAIL_RE = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.I)
@@ -143,11 +142,14 @@ NAME_CANDIDATE_RE = re.compile(r'\b([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,2})\b')
 STOP_TOKENS = {"Meeting","Minutes","Action","Actions","Items","Item","Next","Steps",
                "Open","Questions","Decisions","Decision","Project","Policy","Summary",
                "GDPR","AI","Data","LLM","Email","Phone","Owner","Deadline","Risk",
-               "Risks","Notes","Agenda","Follow","Up","Follow-Up","Q&A"}
+               "Risks","Notes","Agenda","Follow","Up","Follow-Up","Q&A",
+               "App","Store","Mobile","Roadmap","Security","Audit","Team","QA","API","Zahlungspartner"}
 MONTHS = {"January","February","March","April","May","June","July","August","September",
-          "October","November","December","Jan","Feb","Mar","Apr","Jun","Jul","Aug","Sep","Sept","Oct","Nov","Dec"}
+          "October","November","December","Jan","Feb","Mar","Apr","Jun","Jul","Aug","Sep","Sept","Oct","Nov","Dec",
+          "Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"}
 DAYS = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday",
-        "Mon","Tue","Wed","Thu","Fri","Sat","Sun"}
+        "Mon","Tue","Wed","Thu","Fri","Sat","Sun",
+        "Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"}
 
 def looks_like_name(candidate: str) -> bool:
     tokens = candidate.split()
@@ -194,6 +196,17 @@ def mask_text_with_pseudonyms(s: str) -> Tuple[str, Dict[str, str], int, int]:
     masked = NAME_CANDIDATE_RE.sub(name_subber, masked)
 
     return masked, getattr(name_subber, "mapping", {}), email_count, phone_count
+
+def unmask_names(text: str, name_map: Dict[str, str]) -> str:
+    """Replace [name_n] tags back to original names for display."""
+    if not name_map:
+        return text
+    # invert mapping: tag -> original
+    inv = {v: k for k, v in name_map.items()}
+    # replace longest tags first to avoid partial overlaps
+    for tag in sorted(inv.keys(), key=lambda x: (-len(x), x)):
+        text = text.replace(tag, inv[tag])
+    return text
 
 # ================================ File readers ===============================
 def read_txt(file_bytes: bytes) -> str:
@@ -402,7 +415,6 @@ with c2:
         accept_multiple_files=True,
         help=TXT[LANG]["upload_help"]
     )
-    # Extra hint since the internal dropzone text isn't localizable
     st.caption(TXT[LANG]["upload_hint_below"])
 
 uploaded_texts: List[str] = []
@@ -431,7 +443,6 @@ if generate:
         st.stop()
 
     with st.spinner(TXT[LANG]["spinning"]):
-        # Mask BEFORE any AI usage
         if mask_pii:
             processed_text, name_map, email_cnt, phone_cnt = mask_text_with_pseudonyms(full_text)
         else:
@@ -450,6 +461,10 @@ if generate:
                 f"### {TXT[LANG]['H_NEXT']}\n- —\n"
             )
 
+        # Restore original names in the display (emails/phones remain masked)
+        if mask_pii and not keep_names_masked_out:
+            raw_out = unmask_names(raw_out, name_map)
+
         rendered = canonicalize_minutes(raw_out, LANG)
         if polish:
             rendered = re.sub(r'\n{3,}', '\n\n', rendered).strip() + "\n"
@@ -465,6 +480,6 @@ if generate:
         if name_map:
             names_list = [name_map[k] for k in name_map]
             label = "- Names masked: " if LANG=="en" else "- Namen anonymisiert: "
-            st.write(f"{label}{len(name_map)} → {names_list}")
+            st.write(f"{label}{len(name_map)} → {[name_map[k] for k in name_map]}")
         else:
             st.write("- Names masked: 0" if LANG=="en" else "- Namen anonymisiert: 0")
